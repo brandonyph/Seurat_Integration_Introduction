@@ -1,0 +1,375 @@
+---
+title: "Integration_introduction"
+author: "BrandonYEO"
+date: "2/11/2022"
+output: 
+  md_document:
+    variant: gfm
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Based on https://satijalab.org/seurat/articles/integration_introduction.html
+
+```{r}
+suppressWarnings(library(Seurat))
+suppressWarnings(library(SeuratData))
+suppressWarnings(library(patchwork))
+```
+
+# Chapter 1 - Build an merged Seurat Object using own data 
+
+You can also load your own data using the read10x function
+Make sure you have all three file in the correct directory 
+
+1. matrix.mtx
+2. genes.tsv
+3. barcodes.tsv
+
+```{r}
+URL <- "D:/Documents/GitHub/Introduction-to-Seurat-Package/pbmc3k_filtered_gene_bc_matrices/filtered_gene_bc_matrices/hg19"
+
+# Load the PBMC dataset1
+pbmc.data1 <- Read10X(data.dir = URL)
+# Initialize the Seurat object with the raw (non-normalized data).
+ctrl <- CreateSeuratObject(counts = pbmc.data1, project = "pbmc3k", min.cells = 300, min.features = 200)
+
+# Load the PBMC dataset2
+pbmc.data2 <- Read10X(data.dir = URL)
+# Initialize the Seurat object with the raw (non-normalized data).
+stim <- CreateSeuratObject(counts = pbmc.data2, project = "pbmc3k", min.cells = 600, min.features = 200)
+
+pmbc.list <- list(ctrl,stim)
+```
+
+
+```{r}
+merged.pbmc <- merge(x = ctrl, y = stim, add.cell.ids = c("3K", "4K"))
+
+#more than one sample
+#merged.pbmc <- merge(x = ctrl, y = c(stim1,stim2,stim3))
+
+#Example from seurat
+#https://satijalab.org/seurat/articles/merge_vignette.html
+#pbmc.big <- merge(pbmc3k, y = c(pbmc4k, pbmc8k), add.cell.ids = c("3K", "4K", "8K"), project = "PBMC15K")
+#pbmc.big
+```
+
+#  Chapter 1 - Adding MetaData 
+```{r}
+library(stringr)
+sample <- names(merged.pbmc@active.ident)
+sample_detect <- ifelse(str_detect(sample,"3K"),"3K","4K")
+
+merged.pbmc@meta.data$sample <- sample_detect
+
+Idents(object = merged.pbmc) <- "sample"
+```
+
+#  Chapter 1 - Normalized Data and Intergrate the two dataset 
+```{r}
+pmbc.list <-  SplitObject(merged.pbmc, split.by = "sample")
+
+# perform standard preprocessing on each object
+for (i in 1:length(pmbc.list)) {
+  pmbc.list[[i]] <- NormalizeData(pmbc.list[[i]], verbose = FALSE)
+  pmbc.list[[i]] <- subset(pmbc.list[[i]], downsample = 1000)
+  pmbc.list[[i]] <- FindVariableFeatures(
+    pmbc.list[[i]], selection.method = "vst",
+    nfeatures = 2000, verbose = FALSE
+  )
+}
+
+# select features that are repeatedly variable across datasets for integration run PCA on each
+# dataset using these features
+features <- SelectIntegrationFeatures(object.list = pmbc.list)
+pmbc.list <- lapply(X = pmbc.list, FUN = function(x) {
+    x <- ScaleData(x, features = features, verbose = FALSE)
+    x <- RunPCA(x, features = features, verbose = FALSE)
+})
+
+```
+
+#  Chapter 1 - Intergrate Data
+```{r}
+#####################
+# find anchors
+anchors <- FindIntegrationAnchors(object.list = pmbc.list)
+
+# integrate data
+merged.pbmc <- IntegrateData(anchorset = anchors)
+```
+
+#  Chapter 1.2 - Data Cleaning and Dimensional reduction for visualization   
+
+```{r}
+# Run the standard workflow for visualization and clustering
+merged.pbmc <- ScaleData(merged.pbmc, verbose = FALSE)
+merged.pbmc <- FindVariableFeatures(merged.pbmc, 
+                                    selection.method = "vst",
+                                    nfeatures = 2000, 
+                                    verbose = FALSE)
+merged.pbmc <- RunPCA(merged.pbmc, npcs = 30, verbose = FALSE)
+merged.pbmc <- RunUMAP(merged.pbmc, reduction = "pca", dims = 1:30)
+merged.pbmc <- FindNeighbors(merged.pbmc, reduction = "pca", dims = 1:30)
+merged.pbmc <- FindClusters(merged.pbmc, resolution = 0.5)
+gc()
+
+# Visualization
+
+p1 <- DimPlot(merged.pbmc, reduction = "umap")
+p1
+```
+
+
+```{r}
+Idents(object = merged.pbmc) <- "sample"
+p2 <- DimPlot(merged.pbmc, reduction = "umap")
+p2
+```
+
+
+```{r}
+p1+p2
+```
+```{r}
+# Find differentially expressed features between CD14+ Monocytes and all other cells, only
+# search for positive markers
+Idents(object = merged.pbmc) <- "sample"
+
+sammple.markers <- FindMarkers(merged.pbmc, ident.1 = "3K", ident.2 = "4K")
+# view results
+head(sammple.markers)
+# There shouldn't be any, but.........
+
+library(ComplexHeatmap)
+
+heatmapdf <- sammple.markers[1:25,]
+row_ha = rowAnnotation("CD14+ Mono" = anno_barplot(heatmapdf$pct.1),
+                       "Others"= anno_barplot(heatmapdf$pct.2),
+                       width = unit(10, "cm"))
+
+ht0 <- Heatmap(heatmapdf$avg_log2FC,
+                name = "Log2FC",
+                cluster_rows = TRUE, 
+                row_labels = rownames(heatmapdf), 
+                right_annotation = row_ha,
+                width = unit(1, "cm"))
+
+ht0
+
+```
+
+
+
+
+```{r}
+# Find differentially expressed features between CD14+ Monocytes and all other cells, only
+# search for positive markers
+Idents(object = merged.pbmc) <- "seurat_clusters"
+
+cluster1.de.markers <- FindMarkers(merged.pbmc, ident.1 = "0", ident.2 = NULL, only.pos = TRUE)
+# view results
+head(cluster1.de.markers)
+
+library(ComplexHeatmap)
+
+heatmapdf <- cluster1.de.markers[1:25,]
+row_ha = rowAnnotation("CD14+ Mono" = anno_barplot(heatmapdf$pct.1),
+                       "Others"= anno_barplot(heatmapdf$pct.2),
+                       width = unit(10, "cm"))
+
+ht1 <- Heatmap(heatmapdf$avg_log2FC,
+                name = "Log2FC",
+                cluster_rows = TRUE, 
+                row_labels = rownames(heatmapdf), 
+                right_annotation = row_ha,
+                width = unit(1, "cm"))
+
+ht1
+
+```
+
+
+
+
+####################################################################
+
+# Chapter 2 - Using ifnb Dataset (The proper way)
+
+```{r}
+# install dataset for the first time
+#InstallData("ifnb")
+
+# load dataset
+suppressWarnings(suppressMessages(LoadData("ifnb")))
+
+ifnb <- ifnb
+
+#?ifnb
+```
+
+
+```{r}
+# split the dataset into a list of two seurat objects (stim and CTRL)
+ifnb.list <- SplitObject(ifnb, split.by = "stim")
+ifnb.list <- lapply(X = ifnb.list, FUN = NormalizeData)
+
+# normalize and identify variable features for each dataset independently
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+    x <- subset(x, downsample = 1000)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+    
+})
+```
+# Chapter 2 - Feature selection
+```{r}
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features)
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors)
+
+```
+# Chapter 2 - Data Procecssing 
+
+```{r}
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:30)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:30)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+gc()
+```
+
+# Chapter 2 - Visualise Data 
+```{r}
+# Visualization
+p1 <- DimPlot(immune.combined, reduction = "umap", group.by = "stim")
+p1
+```
+
+```{r}
+p2 <- DimPlot(immune.combined, reduction = "umap", label = TRUE, repel = TRUE)
+p2
+```
+
+```{r}
+p1 + p2
+```
+
+# Chapter 2 -  Identify conserved cell type markers
+
+```{r}
+# For performing differential expression after integration, we switch back to the original
+# data
+DefaultAssay(immune.combined) <- "RNA"
+nk.markers <- FindConservedMarkers(immune.combined, ident.1 = 6, grouping.var = "stim", verbose = FALSE)
+
+#https://www.biostars.org/p/409790/
+
+#FindMarkers will find markers between two different identity groups - you have to specify both #identity groups. This is useful for comparing the differences between two specific groups.
+
+#FindAllMarkers will find markers differentially expressed in each identity group by comparing #it to all of the others - you don't have to manually define anything. Note that markers may #bleed over between closely-related groups - they are not forced to be specific to only one #group. This is what most people use (and likely what you want).
+
+#FindConservedMarkers will find markers that are conserved between two groups - this can be #useful if you want to find markers that are conserved between a treated and untreated condition #for a specific cell type or group of cells. It means they are differentially expressed compared #to other groups, but have similar expression between the two groups you're actually comparing.
+
+head(nk.markers)
+```
+
+
+```{r}
+FeaturePlot(immune.combined, features = c("CD3D", "SELL", "CREM", "CD8A", "GNLY", "CD79A", "FCGR3A", "CCL2", "PPBP"), min.cutoff = "q9",pt.size = 2)
+```
+# Chapter 2 - Renaming clusters 
+
+```{r}
+levels(immune.combined)
+renamed.immune.combined <- RenameIdents(immune.combined, "1"= "new 1") 
+levels(renamed.immune.combined)
+```
+# Chapter 2 - Dimplot with new cluster names
+
+```{r}
+immune.combined <- RenameIdents(immune.combined, "0" = "CD14 Mono", "1" = "CD4 Naive T", "2" = "CD4 Memory T","3" = "CD16 Mono", "4" = "B", "5" = "CD8 T", "6" = "NK", "7" = "T activated", "8" = "DC", "9" = "B Activated", "10" = "Mk", "11" = "pDC", "12" = "Eryth", "13" = "Mono/Mk Doublets", "14" = "HSPC")
+
+levels(immune.combined)
+
+table(Idents(object = immune.combined))
+
+DimPlot(immune.combined, label = TRUE)
+```
+
+```{r}
+Idents(immune.combined) <- factor(Idents(immune.combined), levels = c("HSPC", "Mono/Mk Doublets","pDC", "Eryth", "Mk", "DC", "CD14 Mono", "CD16 Mono", "B Activated", "B", "CD8 T", "NK", "T activated","CD4 Naive T", "CD4 Memory T"))
+```
+
+
+```{r}
+markers.to.plot <- c("CD3D", "CREM", "HSPH1", "SELL", "GIMAP5", "CACYBP", "GNLY", "NKG7", "CCL5", "CD8A", "MS4A1", "CD79A", "MIR155HG", "NME1", "FCGR3A", "VMO1", "CCL2", "S100A9", "HLA-DQA1","GPR183", "PPBP", "GNG11", "HBA2", "HBB", "TSPAN13", "IL3RA", "IGJ", "PRSS57")
+```
+
+
+# Chapter 2 - Dotplot 
+
+```{r}
+DotPlot(immune.combined, features = markers.to.plot, cols = c("blue", "red"), dot.scale = 8, split.by = "stim") + RotatedAxis()
+```
+
+
+# Chapter 2 -  Identify differential expressed genes across conditions
+```{r}
+library(ggplot2)
+library(cowplot)
+theme_set(theme_cowplot())
+t.cells <- subset(immune.combined, idents = "CD4 Naive T")
+Idents(t.cells) <- "stim"
+avg.t.cells <- as.data.frame(log1p(AverageExpression(t.cells, verbose = FALSE)$RNA))
+avg.t.cells$gene <- rownames(avg.t.cells)
+
+cd14.mono <- subset(immune.combined, idents = "CD14 Mono")
+Idents(cd14.mono) <- "stim"
+avg.cd14.mono <- as.data.frame(log1p(AverageExpression(cd14.mono, verbose = FALSE)$RNA))
+avg.cd14.mono$gene <- rownames(avg.cd14.mono)
+
+genes.to.label = c("ISG15", "LY6E", "IFI6", "ISG20", "MX1", "IFIT2", "IFIT1", "CXCL10", "CCL8")
+p1 <- ggplot(avg.t.cells, aes(CTRL, STIM)) + geom_point() + ggtitle("CD4 Naive T Cells")
+p1 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE)
+p2 <- ggplot(avg.cd14.mono, aes(CTRL, STIM)) + geom_point() + ggtitle("CD14 Monocytes")
+p2 <- LabelPoints(plot = p2, points = genes.to.label, repel = TRUE)
+p1 + p2
+```
+# Chapter 2 - Inteferon response
+
+```{r}
+immune.combined$celltype.stim <- paste(Idents(immune.combined), immune.combined$stim, sep = "_")
+immune.combined$celltype <- Idents(immune.combined)
+Idents(immune.combined) <- "celltype.stim"
+
+b.interferon.response <- FindMarkers(immune.combined, ident.1 = "B_STIM", ident.2 = "B_CTRL", verbose = FALSE)
+
+head(b.interferon.response, n = 15)
+```
+```{r}
+FeaturePlot(immune.combined, features = c("CD3D", "GNLY", "IFI6"), split.by = "stim", max.cutoff = 2, cols = c("grey", "red"))
+```
+# Chapter 2 -  Violin plot on different conditions
+
+```{r}
+plots <- VlnPlot(immune.combined, features = c("ISG15", "CXCL10"), split.by = "stim", group.by = "celltype", pt.size = 0, combine = FALSE)
+
+wrap_plots(plots = plots, ncol = 1)
+```
+
+
+
